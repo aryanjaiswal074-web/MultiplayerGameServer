@@ -1,0 +1,116 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game Arena | Multiplayer Tic-Tac-Toe</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <header class="site-header">
+        <div class="logo">GAME<span>ARENA</span></div>
+        <div class="server-status">
+            <span class="status-dot"></span>
+            <span id="server-status">SERVER OFFLINE</span>
+        </div>
+    </header>
+
+    <main class="container">
+
+        <section class="hero">
+            <div class="hero-content">
+
+                <p class="eyebrow">REAL-TIME MULTIPLAYER GAMING</p>
+
+                <h1>
+                    THINK. PLAY.<br>
+                    <span>DOMINATE.</span>
+                </h1>
+
+                <p class="description">
+                    Challenge players in real-time.
+                    Make your move. Claim your victory.
+                </p>
+
+                <div class="player-form">
+                    <label for="username">PLAYER NAME</label>
+
+                    <input
+                        type="text"
+                        id="username"
+                        placeholder="Enter your name"
+                        maxlength="20"
+                        value="Player"
+                    >
+
+                    <button id="find-match">
+                        FIND AN OPPONENT
+                        <span>→</span>
+                    </button>
+
+                    <p id="status-message">
+                        Enter your name and find an opponent.
+                    </p>
+                </div>
+
+            </div>
+
+            <section class="game-preview">
+
+                <div class="preview-header">
+                    <span>LIVE MATCH</span>
+                    <span id="match-status">WAITING</span>
+                </div>
+
+                <div class="players">
+                    <div class="player">
+                        <h3 id="player-x-name">PLAYER X</h3>
+                        <span class="symbol-x">X</span>
+                    </div>
+
+                    <span class="versus">VS</span>
+
+                    <div class="player">
+                        <h3 id="player-o-name">PLAYER O</h3>
+                        <span class="symbol-o">O</span>
+                    </div>
+                </div>
+
+                <div class="board" id="board">
+
+                    <button class="cell" data-position="1" disabled></button>
+                    <button class="cell" data-position="2" disabled></button>
+                    <button class="cell" data-position="3" disabled></button>
+
+                    <button class="cell" data-position="4" disabled></button>
+                    <button class="cell" data-position="5" disabled></button>
+                    <button class="cell" data-position="6" disabled></button>
+
+                    <button class="cell" data-position="7" disabled></button>
+                    <button class="cell" data-position="8" disabled></button>
+                    <button class="cell" data-position="9" disabled></button>
+
+                </div>
+
+                <p class="preview-footer" id="turn-message">
+                    WAITING FOR PLAYERS
+                </p>
+
+            </section>
+
+        </section>
+
+    </main>
+
+    <footer>
+        <span>GAME ARENA © 2026</span>
+        <span>POWERED BY C SOCKET PROGRAMMING</span>
+    </footer>
+
+    <script src="app.js"></script>
+
+</body>
+</html>
