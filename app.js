@@ -1,5 +1,6 @@
+
 const SERVER_URL =
-    "wss://qualities-calls-taxi-investor.trycloudflare.com";
+    "wss://background-arabia-cameras-craft.trycloudflare.com";
 
 let socket = null;
 let mySymbol = null;
