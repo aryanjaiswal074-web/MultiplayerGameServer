@@ -1,6 +1,6 @@
 
 const SERVER_URL =
-    "wss://background-arabia-cameras-craft.trycloudflare.com";
+    "wss://multiplayergameserver-sky4.onrender.com";
 
 let socket = null;
 let mySymbol = null;
