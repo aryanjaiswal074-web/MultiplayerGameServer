@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PORT 8081
 #define MAX_PLAYERS 2
 #define MESSAGE_SIZE 256
 #define QUEUE_SIZE 8
@@ -337,11 +336,28 @@ static const struct lws_protocols protocols[] = {
 /* Main server */
 int main(void) {
 
+    const char *port_env = getenv("PORT");
+    int port = 8081;
+
+    if (port_env != NULL && port_env[0] != '\0') {
+        char *end = NULL;
+        long parsed_port = strtol(port_env, &end, 10);
+
+        if (end == port_env || *end != '\0' ||
+            parsed_port < 1 || parsed_port > 65535) {
+            fprintf(stderr, "Invalid PORT environment variable\n");
+            return 1;
+        }
+
+        port = (int)parsed_port;
+    }
+
     struct lws_context_creation_info info;
 
     memset(&info, 0, sizeof(info));
 
-    info.port = PORT;
+    info.port = port;
+    info.iface = "0.0.0.0";
     info.protocols = protocols;
 
     struct lws_context *context = lws_create_context(&info);
@@ -355,7 +371,8 @@ int main(void) {
     printf("=================================\n");
     printf("       GAME ARENA SERVER\n");
     printf("=================================\n");
-    printf("WebSocket port: %d\n", PORT);
+    printf("WebSocket port: %d\n", port);
+    printf("Listening on: 0.0.0.0\n");
     printf("Waiting for two players...\n");
     printf("=================================\n\n");
 
