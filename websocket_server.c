@@ -1,32 +1,40 @@
-
 #include <libwebsockets.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_PLAYERS 2
+#define MAX_ROOMS 10
+#define MAX_PLAYERS_PER_ROOM 2
 #define MESSAGE_SIZE 256
-#define QUEUE_SIZE 8
+#define QUEUE_SIZE 16
+
+struct Room;
 
 struct Player {
     struct lws *wsi;
+    struct Room *room;
     char symbol;
     int slot;
+    int waiting_public;
 
     char messages[QUEUE_SIZE][MESSAGE_SIZE];
     int head;
     int count;
 };
 
-static struct Player *players[MAX_PLAYERS] = {NULL, NULL};
+struct Room {
+    int used;
+    int game_active;
+    struct Player *players[2];
+    char board[9];
+    char current_turn;
+    int rematch_ready[2];
+};
 
-static char board[9];
-static char current_turn = 'X';
-static int game_active = 0;
+static struct Room rooms[MAX_ROOMS];
 
-/* Add a message to a player's outgoing queue */
 static void queue_message(struct Player *player, const char *message) {
-    if (player == NULL || player->wsi == NULL)
+    if (!player || !player->wsi)
         return;
 
     if (player->count >= QUEUE_SIZE) {
@@ -36,37 +44,110 @@ static void queue_message(struct Player *player, const char *message) {
 
     int tail = (player->head + player->count) % QUEUE_SIZE;
 
-    snprintf(
-        player->messages[tail],
-        MESSAGE_SIZE,
-        "%s",
-        message
-    );
+    snprintf(player->messages[tail], MESSAGE_SIZE, "%s", message);
 
     player->count++;
 
     lws_callback_on_writable(player->wsi);
 }
 
-/* Send a message to both players */
-static void broadcast(const char *message) {
-    for (int i = 0; i < MAX_PLAYERS; i++) {
-        if (players[i] != NULL)
-            queue_message(players[i], message);
+static void broadcast(struct Room *room, const char *message) {
+    if (!room)
+        return;
+
+    for (int i = 0; i < 2; i++) {
+        if (room->players[i])
+            queue_message(room->players[i], message);
     }
 }
 
-/* Initialize a new game */
-static void reset_game(void) {
+static void reset_game(struct Room *room) {
     for (int i = 0; i < 9; i++)
-        board[i] = '1' + i;
+        room->board[i] = '1' + i;
 
-    current_turn = 'X';
-    game_active = 1;
+    room->current_turn = 'X';
+    room->game_active = 1;
+    room->rematch_ready[0] = 0;
+    room->rematch_ready[1] = 0;
 }
 
-/* Check for a winner */
-static char check_winner(void) {
+static void release_room_if_empty(struct Room *room) {
+    if (!room)
+        return;
+
+    if (!room->players[0] && !room->players[1]) {
+        printf("Room %ld released.\n", (long)(room - rooms) + 1);
+        memset(room, 0, sizeof(*room));
+    }
+}
+
+static void detach_player(struct Player *player, int notify_opponent) {
+    if (!player || !player->room)
+        return;
+
+    struct Room *room = player->room;
+    int slot = player->slot;
+
+    if (slot >= 0 && slot < 2 &&
+        room->players[slot] == player) {
+
+        room->players[slot] = NULL;
+        room->game_active = 0;
+        room->rematch_ready[0] = 0;
+        room->rematch_ready[1] = 0;
+
+        int opponent_slot = 1 - slot;
+        struct Player *opponent = room->players[opponent_slot];
+
+        if (opponent && notify_opponent) {
+            queue_message(opponent, "OPPONENT_LEFT");
+        }
+    }
+
+    player->room = NULL;
+    player->slot = -1;
+    player->waiting_public = 0;
+
+    release_room_if_empty(room);
+}
+
+static struct Room *find_waiting_room(void) {
+    for (int i = 0; i < MAX_ROOMS; i++) {
+        struct Room *room = &rooms[i];
+
+        if (!room->used || room->game_active)
+            continue;
+
+        if (room->players[0] &&
+            !room->players[1] &&
+            room->players[0]->waiting_public)
+            return room;
+
+        if (!room->players[0] &&
+            room->players[1] &&
+            room->players[1]->waiting_public)
+            return room;
+    }
+
+    return NULL;
+}
+
+static struct Room *create_room(void) {
+    for (int i = 0; i < MAX_ROOMS; i++) {
+        if (!rooms[i].used) {
+            struct Room *room = &rooms[i];
+
+            memset(room, 0, sizeof(*room));
+            room->used = 1;
+
+            return room;
+        }
+    }
+
+    return NULL;
+}
+
+static char check_winner(struct Room *room) {
     const int lines[8][3] = {
         {0, 1, 2},
         {3, 4, 5},
@@ -83,43 +164,224 @@ static char check_winner(void) {
         int b = lines[i][1];
         int c = lines[i][2];
 
-        if (board[a] == board[b] &&
-            board[b] == board[c] &&
-            (board[a] == 'X' || board[a] == 'O')) {
-            return board[a];
-        }
+        char value = room->board[a];
+
+        if ((value == 'X' || value == 'O') &&
+            value == room->board[b] &&
+            value == room->board[c])
+            return value;
     }
 
     return 0;
 }
 
-/* Check for a draw */
-static int check_draw(void) {
+static int check_draw(struct Room *room) {
     for (int i = 0; i < 9; i++) {
-        if (board[i] != 'X' && board[i] != 'O')
+        if (room->board[i] != 'X' &&
+            room->board[i] != 'O')
             return 0;
     }
 
     return 1;
 }
 
-/* Broadcast the current board */
-static void send_board(void) {
+static void send_board(struct Room *room) {
     char message[64];
 
     snprintf(
         message,
         sizeof(message),
-        "BOARD:%.*s:%c",
-        9,
-        board,
-        current_turn
+        "BOARD:%.9s:%c",
+        room->board,
+        room->current_turn
     );
 
-    broadcast(message);
+    broadcast(room, message);
 }
 
-/* Handle browser connections and messages */
+static void start_match(struct Room *room) {
+    if (!room || !room->players[0] || !room->players[1])
+        return;
+
+    reset_game(room);
+
+    room->players[0]->symbol = 'X';
+    room->players[0]->slot = 0;
+    room->players[0]->waiting_public = 0;
+
+    room->players[1]->symbol = 'O';
+    room->players[1]->slot = 1;
+    room->players[1]->waiting_public = 0;
+
+    queue_message(room->players[0], "START:X");
+    queue_message(room->players[1], "START:O");
+
+    send_board(room);
+
+    printf(
+        "Room %ld started: X vs O\n",
+        (long)(room - rooms) + 1
+    );
+
+    fflush(stdout);
+}
+
+/* A rematch starts only after both players agree. */
+static void handle_rematch(struct Player *player, int accepted) {
+    if (!player || !player->room ||
+        player->slot < 0 || player->slot > 1) {
+        queue_message(player, "ERROR:REMATCH_UNAVAILABLE");
+        return;
+    }
+
+    struct Room *room = player->room;
+    int opponent_slot = 1 - player->slot;
+
+    if (room->game_active ||
+        !room->players[0] ||
+        !room->players[1] ||
+        room->players[player->slot] != player) {
+        queue_message(player, "ERROR:REMATCH_UNAVAILABLE");
+        return;
+    }
+
+    room->rematch_ready[player->slot] = 1;
+
+    queue_message(player, "REMATCH_WAITING");
+
+    if (!accepted && room->players[opponent_slot]) {
+        queue_message(
+            room->players[opponent_slot],
+            "REMATCH_INVITE"
+        );
+    }
+
+    if (room->rematch_ready[0] &&
+        room->rematch_ready[1]) {
+
+        printf(
+            "Room %ld: rematch accepted by both players.\n",
+            (long)(room - rooms) + 1
+        );
+
+        start_match(room);
+    }
+
+    fflush(stdout);
+}
+
+static void join_public_matchmaking(struct Player *player) {
+    if (!player || !player->wsi)
+        return;
+
+    if (player->room)
+        detach_player(player, 1);
+
+    struct Room *room = find_waiting_room();
+
+    if (!room)
+        room = create_room();
+
+    if (!room) {
+        queue_message(player, "ERROR:ROOM_FULL");
+        return;
+    }
+
+    int slot = room->players[0] ? 1 : 0;
+
+    if (room->players[slot]) {
+        queue_message(player, "ERROR:ROOM_FULL");
+        return;
+    }
+
+    room->players[slot] = player;
+
+    player->room = room;
+    player->slot = slot;
+    player->symbol = slot == 0 ? 'X' : 'O';
+    player->waiting_public = 1;
+
+    printf(
+        "Player joined Room %ld as %c\n",
+        (long)(room - rooms) + 1,
+        player->symbol
+    );
+
+    queue_message(player, "WAIT");
+
+    if (room->players[0] && room->players[1])
+        start_match(room);
+
+    fflush(stdout);
+}
+
+static void handle_move(struct Player *player, const char *input) {
+    struct Room *room = player->room;
+
+    if (!room || !room->game_active || player->slot < 0)
+        return;
+
+    if (player->symbol != room->current_turn)
+        return;
+
+    char *end = NULL;
+    long position = strtol(input + 5, &end, 10);
+
+    if (end == input + 5 || *end != '\0' ||
+        position < 1 || position > 9)
+        return;
+
+    int index = (int)position - 1;
+
+    if (room->board[index] == 'X' ||
+        room->board[index] == 'O')
+        return;
+
+    room->board[index] = player->symbol;
+
+    char winner = check_winner(room);
+
+    if (winner) {
+        send_board(room);
+
+        char result[32];
+        snprintf(result, sizeof(result), "RESULT:%c", winner);
+
+        broadcast(room, result);
+
+        room->game_active = 0;
+        room->players[0]->waiting_public = 0;
+        room->players[1]->waiting_public = 0;
+
+        printf(
+            "Room %ld: Player %c won.\n",
+            (long)(room - rooms) + 1,
+            winner
+        );
+    }
+    else if (check_draw(room)) {
+        send_board(room);
+        broadcast(room, "RESULT:D");
+
+        room->game_active = 0;
+        room->players[0]->waiting_public = 0;
+        room->players[1]->waiting_public = 0;
+
+        printf(
+            "Room %ld ended in a draw.\n",
+            (long)(room - rooms) + 1
+        );
+    }
+    else {
+        room->current_turn =
+            room->current_turn == 'X' ? 'O' : 'X';
+
+        send_board(room);
+    }
+
+    fflush(stdout);
+}
+
 static int callback_game(
     struct lws *wsi,
     enum lws_callback_reasons reason,
@@ -131,66 +393,25 @@ static int callback_game(
 
     switch (reason) {
 
-        case LWS_CALLBACK_ESTABLISHED: {
-
+        case LWS_CALLBACK_ESTABLISHED:
             memset(player, 0, sizeof(*player));
 
             player->wsi = wsi;
             player->slot = -1;
 
-            int slot = -1;
+            printf("New player connected.\n");
 
-            for (int i = 0; i < MAX_PLAYERS; i++) {
-                if (players[i] == NULL) {
-                    slot = i;
-                    break;
-                }
-            }
-
-            if (slot == -1) {
-                lwsl_notice("Room full: rejecting connection\n");
-                return -1;
-            }
-
-            player->slot = slot;
-            player->symbol = slot == 0 ? 'X' : 'O';
-
-            players[slot] = player;
-
-            printf("Player %c connected\n", player->symbol);
-
-            queue_message(player, "WAIT");
-
-            if (players[0] != NULL && players[1] != NULL) {
-
-                reset_game();
-
-                queue_message(players[0], "START:X");
-                queue_message(players[1], "START:O");
-
-                send_board();
-
-                printf("Two players matched. Game started!\n");
-            }
-
+            join_public_matchmaking(player);
             break;
-        }
 
-        case LWS_CALLBACK_SERVER_WRITEABLE: {
-
+        case LWS_CALLBACK_SERVER_WRITEABLE:
             if (player->count > 0) {
-
                 unsigned char buffer[LWS_PRE + MESSAGE_SIZE];
 
                 char *message = player->messages[player->head];
-
                 size_t message_len = strlen(message);
 
-                memcpy(
-                    buffer + LWS_PRE,
-                    message,
-                    message_len
-                );
+                memcpy(buffer + LWS_PRE, message, message_len);
 
                 int result = lws_write(
                     wsi,
@@ -202,118 +423,50 @@ static int callback_game(
                 if (result < 0 || (size_t)result != message_len)
                     return -1;
 
-                player->head = (player->head + 1) % QUEUE_SIZE;
+                player->head =
+                    (player->head + 1) % QUEUE_SIZE;
+
                 player->count--;
 
                 if (player->count > 0)
                     lws_callback_on_writable(wsi);
             }
-
             break;
-        }
 
         case LWS_CALLBACK_RECEIVE: {
-
-            if (!game_active || player->slot < 0)
-                break;
-
             if (len == 0 || len >= 64)
                 break;
 
             char input[64] = {0};
-
             memcpy(input, in, len);
             input[len] = '\0';
 
-            if (strncmp(input, "MOVE:", 5) != 0)
-                break;
-
-            char *end = NULL;
-            long position = strtol(input + 5, &end, 10);
-
-            if (end == input + 5 || *end != '\0')
-                break;
-
-            if (position < 1 || position > 9)
-                break;
-
-            if (player->symbol != current_turn)
-                break;
-
-            int index = (int)position - 1;
-
-            if (board[index] == 'X' || board[index] == 'O')
-                break;
-
-            board[index] = player->symbol;
-
-            char winner = check_winner();
-
-            if (winner != 0) {
-
-                send_board();
-
-                char result[32];
-
-                snprintf(
-                    result,
-                    sizeof(result),
-                    "RESULT:%c",
-                    winner
-                );
-
-                broadcast(result);
-
-                game_active = 0;
-
-                printf("Player %c won!\n", winner);
+            if (strncmp(input, "MOVE:", 5) == 0) {
+                handle_move(player, input);
             }
-            else if (check_draw()) {
-
-                send_board();
-                broadcast("RESULT:D");
-
-                game_active = 0;
-
-                printf("Game ended in a draw\n");
+            else if (strcmp(input, "FIND_MATCH") == 0) {
+                printf("Player requested public matchmaking.\n");
+                join_public_matchmaking(player);
             }
-            else {
-
-                current_turn =
-                    current_turn == 'X' ? 'O' : 'X';
-
-                send_board();
+            else if (strcmp(input, "REMATCH_REQUEST") == 0) {
+                printf("Player requested a rematch.\n");
+                handle_rematch(player, 0);
+            }
+            else if (strcmp(input, "REMATCH_ACCEPT") == 0) {
+                printf("Player accepted a rematch invitation.\n");
+                handle_rematch(player, 1);
             }
 
             break;
         }
 
-        case LWS_CALLBACK_CLOSED: {
+        case LWS_CALLBACK_CLOSED:
+            printf("Player disconnected.\n");
 
-            printf("Player disconnected\n");
+            detach_player(player, 1);
 
-            int slot = player->slot;
-
-            if (slot >= 0 &&
-                slot < MAX_PLAYERS &&
-                players[slot] == player) {
-
-                players[slot] = NULL;
-
-                game_active = 0;
-
-                int opponent = 1 - slot;
-
-                if (players[opponent] != NULL) {
-                    queue_message(
-                        players[opponent],
-                        "OPPONENT_LEFT"
-                    );
-                }
-            }
-
+            fflush(stdout);
             break;
-        }
 
         default:
             break;
@@ -322,7 +475,6 @@ static int callback_game(
     return 0;
 }
 
-/* WebSocket protocol configuration */
 static const struct lws_protocols protocols[] = {
     {
         .name = "tic-tac-toe",
@@ -333,27 +485,24 @@ static const struct lws_protocols protocols[] = {
     {0}
 };
 
-/* Main server */
 int main(void) {
-
     const char *port_env = getenv("PORT");
     int port = 8081;
 
-    if (port_env != NULL && port_env[0] != '\0') {
+    if (port_env && port_env[0]) {
         char *end = NULL;
-        long parsed_port = strtol(port_env, &end, 10);
+        long parsed = strtol(port_env, &end, 10);
 
-        if (end == port_env || *end != '\0' ||
-            parsed_port < 1 || parsed_port > 65535) {
+        if (end == port_env || *end ||
+            parsed < 1 || parsed > 65535) {
             fprintf(stderr, "Invalid PORT environment variable\n");
             return 1;
         }
 
-        port = (int)parsed_port;
+        port = (int)parsed;
     }
 
     struct lws_context_creation_info info;
-
     memset(&info, 0, sizeof(info));
 
     info.port = port;
@@ -362,8 +511,8 @@ int main(void) {
 
     struct lws_context *context = lws_create_context(&info);
 
-    if (context == NULL) {
-        printf("Could not create WebSocket server\n");
+    if (!context) {
+        fprintf(stderr, "Could not create WebSocket server\n");
         return 1;
     }
 
@@ -372,15 +521,16 @@ int main(void) {
     printf("       GAME ARENA SERVER\n");
     printf("=================================\n");
     printf("WebSocket port: %d\n", port);
-    printf("Listening on: 0.0.0.0\n");
-    printf("Waiting for two players...\n");
+    printf("Maximum rooms: %d\n", MAX_ROOMS);
+    printf("Maximum players: %d\n", MAX_ROOMS * 2);
+    printf("Waiting for players...\n");
     printf("=================================\n\n");
 
-    while (1) {
+    fflush(stdout);
+
+    while (1)
         lws_service(context, 1000);
-    }
 
     lws_context_destroy(context);
-
     return 0;
 }
