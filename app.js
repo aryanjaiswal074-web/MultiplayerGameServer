@@ -1,12 +1,17 @@
-
 const SERVER_URL =
-    "wss://multiplayergameserver-sky4.onrender.com";
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1"
+        ? "ws://localhost:8081"
+        : "wss://multiplayergameserver-sky4.onrender.com";
 
 let socket = null;
 let mySymbol = null;
 let currentTurn = null;
 let gameStarted = false;
 let gameFinished = false;
+let rematchAvailable = false;
+let rematchRequested = false;
+let rematchInvited = false;
 let audioContext = null;
 let previousBoard = "---------";
 
@@ -41,7 +46,6 @@ function setTurnMessage(message) {
     turnMessage.textContent = message;
 }
 
-// Audio is created after the player interacts with the page.
 function getAudioContext() {
     const AudioContextClass =
         window.AudioContext || window.webkitAudioContext;
@@ -59,7 +63,13 @@ function getAudioContext() {
     return audioContext;
 }
 
-function playTone(frequency, duration, type = "sine", volume = 0.12, delay = 0) {
+function playTone(
+    frequency,
+    duration,
+    type = "sine",
+    volume = 0.12,
+    delay = 0
+) {
     const context = getAudioContext();
     if (!context) return;
 
@@ -72,8 +82,14 @@ function playTone(frequency, duration, type = "sine", volume = 0.12, delay = 0) 
     oscillator.frequency.setValueAtTime(frequency, startTime);
 
     gain.gain.setValueAtTime(0.001, startTime);
-    gain.gain.exponentialRampToValueAtTime(volume, startTime + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+    gain.gain.exponentialRampToValueAtTime(
+        volume,
+        startTime + 0.02
+    );
+    gain.gain.exponentialRampToValueAtTime(
+        0.001,
+        startTime + duration
+    );
 
     oscillator.connect(gain);
     gain.connect(context.destination);
@@ -110,6 +126,7 @@ function resetBoard() {
     cells.forEach(cell => {
         cell.textContent = "";
         cell.disabled = true;
+
         cell.classList.remove(
             "x-cell",
             "o-cell",
@@ -179,11 +196,15 @@ function drawWinningLine(combination) {
 
     line.style.left = startX + "px";
     line.style.top = startY + "px";
+
     line.style.width =
         Math.hypot(endX - startX, endY - startY) + "px";
 
     line.style.transform =
-        `translateY(-50%) rotate(${Math.atan2(endY - startY, endX - startX) * 180 / Math.PI}deg)`;
+        `translateY(-50%) rotate(${Math.atan2(
+            endY - startY,
+            endX - startX
+        ) * 180 / Math.PI}deg)`;
 
     boardElement.appendChild(line);
 }
@@ -192,8 +213,12 @@ function updateBoard(boardString) {
     if (boardString.length !== 9) return;
 
     const hasNewMove =
-        boardString.split("").filter(value => value === "X" || value === "O").length >
-        previousBoard.split("").filter(value => value === "X" || value === "O").length;
+        boardString.split("").filter(
+            value => value === "X" || value === "O"
+        ).length >
+        previousBoard.split("").filter(
+            value => value === "X" || value === "O"
+        ).length;
 
     if (hasNewMove) {
         playMoveSound();
@@ -232,6 +257,65 @@ function updateBoard(boardString) {
     }
 }
 
+/* Prepare the interface for another match. */
+function prepareForMatch() {
+    mySymbol = null;
+    currentTurn = null;
+    gameStarted = false;
+    gameFinished = false;
+    rematchAvailable = false;
+    rematchRequested = false;
+    rematchInvited = false;
+
+    resetBoard();
+
+    matchStatus.textContent = "SEARCHING";
+    setTurnMessage("FINDING OPPONENT");
+    setStatus("Searching for another player...");
+
+    findMatchButton.disabled = true;
+    findMatchButton.textContent = "SEARCHING...";
+}
+
+/* Start a new matchmaking request on an existing socket. */
+function requestMatch() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        connectToServer();
+        return;
+    }
+
+    if (rematchAvailable && gameFinished) {
+        if (rematchInvited) {
+            rematchInvited = false;
+            rematchRequested = true;
+
+            findMatchButton.disabled = true;
+            findMatchButton.textContent = "ACCEPTING...";
+
+            setStatus("You accepted the rematch invitation.");
+            setTurnMessage("WAITING FOR MATCH");
+
+            socket.send("REMATCH_ACCEPT");
+        } else {
+            rematchRequested = true;
+
+            findMatchButton.disabled = true;
+            findMatchButton.textContent = "WAITING FOR OPPONENT...";
+
+            setStatus("Rematch request sent. Waiting for your opponent...");
+            setTurnMessage("REMATCH REQUESTED");
+
+            socket.send("REMATCH_REQUEST");
+        }
+
+        return;
+    }
+
+    prepareForMatch();
+    socket.send("FIND_MATCH");
+}
+
+/* Create a new connection only when one doesn't already exist. */
 function connectToServer() {
     const username = usernameInput.value.trim();
 
@@ -242,28 +326,26 @@ function connectToServer() {
 
     if (
         socket &&
-        (socket.readyState === WebSocket.OPEN ||
-         socket.readyState === WebSocket.CONNECTING)
+        socket.readyState === WebSocket.OPEN
     ) {
-        setStatus("Already connected or connecting.");
+        requestMatch();
+        return;
+    }
+
+    if (
+        socket &&
+        socket.readyState === WebSocket.CONNECTING
+    ) {
+        setStatus("Already connecting...");
         return;
     }
 
     getAudioContext();
-
-    mySymbol = null;
-    currentTurn = null;
-    gameStarted = false;
-    gameFinished = false;
-
-    resetBoard();
+    prepareForMatch();
 
     matchStatus.textContent = "CONNECTING";
     setTurnMessage("CONNECTING TO SERVER");
     setStatus("Connecting to Game Arena...");
-
-    findMatchButton.disabled = true;
-    findMatchButton.textContent = "CONNECTING...";
 
     try {
         socket = new WebSocket(SERVER_URL, "tic-tac-toe");
@@ -282,6 +364,7 @@ function connectToServer() {
 
     socket.addEventListener("message", event => {
         const message = event.data;
+
         console.log("Server message:", message);
 
         if (message === "WAIT") {
@@ -294,19 +377,24 @@ function connectToServer() {
 
             gameStarted = true;
             gameFinished = false;
+            rematchAvailable = false;
+            rematchRequested = false;
+            rematchInvited = false;
 
             matchStatus.textContent = "MATCH STARTED";
 
             if (mySymbol === "X") {
-                playerXName.textContent = username;
+                playerXName.textContent = usernameInput.value.trim();
                 playerOName.textContent = "OPPONENT";
             } else {
                 playerXName.textContent = "OPPONENT";
-                playerOName.textContent = username;
+                playerOName.textContent = usernameInput.value.trim();
             }
 
             setStatus("Match found! You are Player " + mySymbol);
             setTurnMessage("GAME STARTED");
+
+            findMatchButton.disabled = true;
             findMatchButton.textContent = "MATCH IN PROGRESS";
         }
 
@@ -324,8 +412,12 @@ function connectToServer() {
 
             gameFinished = true;
             gameStarted = false;
+            rematchAvailable = true;
+            rematchRequested = false;
+            rematchInvited = false;
 
             cells.forEach(cell => cell.disabled = true);
+
             matchStatus.textContent = "GAME OVER";
 
             const winningCombination =
@@ -353,9 +445,47 @@ function connectToServer() {
             findMatchButton.textContent = "PLAY AGAIN →";
         }
 
+        else if (message === "REMATCH_WAITING") {
+            rematchRequested = true;
+
+            if (!gameStarted) {
+                findMatchButton.disabled = true;
+                findMatchButton.textContent = "WAITING FOR OPPONENT...";
+                setStatus("Rematch request sent. Waiting for your opponent...");
+                setTurnMessage("REMATCH REQUESTED");
+            }
+        }
+
+        else if (message === "REMATCH_INVITE") {
+            if (rematchAvailable && gameFinished && !gameStarted) {
+                rematchInvited = true;
+                rematchRequested = false;
+
+                findMatchButton.disabled = false;
+                findMatchButton.textContent = "ACCEPT REMATCH →";
+
+                matchStatus.textContent = "REMATCH INVITATION";
+                setTurnMessage("YOUR OPPONENT WANTS A REMATCH!");
+                setStatus("Your opponent wants to play again! Accept the rematch.");
+            }
+        }
+
+        else if (message === "ERROR:REMATCH_UNAVAILABLE") {
+            rematchAvailable = false;
+            rematchRequested = false;
+            rematchInvited = false;
+
+            setStatus("That rematch is no longer available. Find a new opponent.");
+            findMatchButton.disabled = false;
+            findMatchButton.textContent = "FIND AN OPPONENT →";
+        }
+
         else if (message === "OPPONENT_LEFT") {
             gameStarted = false;
             gameFinished = true;
+            rematchAvailable = false;
+            rematchRequested = false;
+            rematchInvited = false;
 
             cells.forEach(cell => cell.disabled = true);
 
@@ -368,7 +498,7 @@ function connectToServer() {
         }
 
         else if (message === "ERROR:ROOM_FULL") {
-            setStatus("Room full. Try again later.");
+            setStatus("All rooms are full. Try again later.");
             matchStatus.textContent = "ROOM FULL";
 
             findMatchButton.disabled = false;
@@ -378,7 +508,7 @@ function connectToServer() {
 
     socket.addEventListener("error", () => {
         serverStatus.textContent = "CONNECTION ERROR";
-        setStatus("Connection failed. Check your server and tunnel.");
+        setStatus("Connection failed. Check your server.");
     });
 
     socket.addEventListener("close", event => {
@@ -400,14 +530,19 @@ function connectToServer() {
 }
 
 function makeMove(position) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    if (!gameStarted || gameFinished) return;
-    if (currentTurn !== mySymbol) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN)
+        return;
+
+    if (!gameStarted || gameFinished)
+        return;
+
+    if (currentTurn !== mySymbol)
+        return;
 
     socket.send("MOVE:" + position);
 }
 
-findMatchButton.addEventListener("click", connectToServer);
+findMatchButton.addEventListener("click", requestMatch);
 
 cells.forEach(cell => {
     cell.addEventListener("click", () => {
