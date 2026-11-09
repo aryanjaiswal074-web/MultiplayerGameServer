@@ -373,6 +373,10 @@ function connectToServer() {
         }
 
         else if (message.startsWith("START:")) {
+
+            // Clear the previous match's board and winning line.
+            resetBoard();
+
             mySymbol = message.split(":")[1];
 
             gameStarted = true;
